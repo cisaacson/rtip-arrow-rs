@@ -96,3 +96,8 @@ required-features = ["flight-sql-experimental", "tls"]
 name = "flight_sql_client_cli"
 path = "tests/flight_sql_client_cli.rs"
 required-features = ["cli", "flight-sql-experimental", "tls"]
+
+[[test]]
+name = "flight_sql_client_empty_result_test"
+path = "tests/flight_sql_client_empty_result_test.rs"
+required-features = ["flight-sql-experimental", "tls"]
