@@ -46,36 +46,52 @@ pub async fn test_get_empty_result() {
     let channel = fixture.channel().await;
     let mut flight_sql_client = FlightSqlServiceClient::new(channel);
 
-    
-    let cmd = make_ingest_command();
-    let expected_rows = 10;
-    let batches = vec![
-        make_primitive_batch(5),
-        make_primitive_batch(3),
-        make_primitive_batch(2),
-    ];
-    let actual_rows = flight_sql_client
-        .execute_ingest(cmd, futures::stream::iter(batches.clone()).map(Ok))
-        .await
-        .expect("ingest should succeed");
-    assert_eq!(actual_rows, expected_rows);
-    // make sure the batches made it through to the server
-    let ingested_batches = test_server.ingested_batches.lock().await.clone();
-    assert_eq!(ingested_batches, batches);
+    // Execute a dummy `CommandStatementQuery` to get a valid
+    // flight_info response.
+    let cmd = CommandStatementQuery {
+        query: "SELECT salutation FROM dummy".to_string(),
+        transaction_id: None,
+    };
+    let flight_info = self.get_flight_info_for_command(cmd).await?;
+
+    if flight_info.endpoint.len() > 1 {
+        panic!("Only a single endpoint is expected from ng_db_server. flight_info.endpoint.len(): {}", flight_info.endpoint.len());
+    }
+
+    let endpoint = &flight_info.endpoint[0];
+
+    // Get the ticket, this must be a `TicketStatementQuery` which contains
+    // the results handle.
+    let ticket = if let Some(ticket) = &endpoint.ticket {
+        ticket
+    } else {
+        panic!("Could not get ticket from the endpoint.");
+    };
+
+    let ticket_any: arrow_flight::sql::Any = prost::Message::decode(ticket.ticket.clone()).expect("Could not decode the ticket.ticket Bytes as a Message.");
+
+    // Now `unpack` the ticket to a `TicketStatementQuery`.
+    let ticket_statement_query: TicketStatementQuery = ticket_any.unpack()?
+        .ok_or_else(|| anyhow!("The TicketStatementQuery is required."))?;
+
+    // Decode the `TicketStatementQuery.statement_handle` now contains the message `Bytes` for the
+    // `results_handle` which is the `String` value we want. 
+    let results_handle: String = prost::Message::decode(ticket_statement_query.statement_handle).expect("Could not decode the TicketStatementQuery.handle");
+
+    let flight_data = self.inner.do_get(ticket.clone()).await?;
+
+    // Get the first RecordBatch which should be an empty batch.
+    let rb = flight_data.next().await?;
+
+    assert!(rb.is_some());
 }
 
 #[derive(Clone)]
-pub struct FlightSqlServiceImpl {
-    transactions: Arc<Mutex<HashMap<String, ()>>>,
-    ingested_batches: Arc<Mutex<Vec<RecordBatch>>>,
-}
+pub struct FlightSqlServiceImpl {}
 
 impl FlightSqlServiceImpl {
     pub fn new() -> Self {
-        Self {
-            transactions: Arc::new(Mutex::new(HashMap::new())),
-            ingested_batches: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self {}
     }
 
     /// Return an [`FlightServiceServer`] that can be used with a
@@ -119,7 +135,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         };
 
         let schema = Schema::new(vec![Field::new("salutation", DataType::Utf8, false)]);
-        
+
         // Build and return the `FlightInfo` response.
         let info = FlightInfo::new()
             .try_with_schema(&schema)
