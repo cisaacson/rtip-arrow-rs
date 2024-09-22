@@ -151,6 +151,16 @@ impl FlightSqlServiceImpl {
         // wrap up tonic goop
         FlightServiceServer::new(self.clone())
     }
+
+    fn fake_empty_result() -> Result<RecordBatch, ArrowError> {
+        let schema = Schema::new(vec![Field::new("salutation", DataType::Utf8, false)]);
+        let mut builder = StringBuilder::new(); // Add an empty StringBuilder array.
+        // builder.append_value("Hello, FlightSQL!");
+        let cols = vec![Arc::new(builder.finish()) as ArrayRef];
+        // RecordBatch::try_new(Arc::new(schema), cols)
+        Ok(RecordBatch::new_empty(schema))
+    }
+
 }
 
 impl Default for FlightSqlServiceImpl {
@@ -163,54 +173,23 @@ impl Default for FlightSqlServiceImpl {
 impl FlightSqlService for FlightSqlServiceImpl {
     type FlightService = FlightSqlServiceImpl;
 
-    async fn do_action_begin_transaction(
-        &self,
-        _query: ActionBeginTransactionRequest,
-        _request: Request<Action>,
-    ) -> Result<ActionBeginTransactionResult, Status> {
-        let transaction_id = Uuid::new_v4().to_string();
-        self.transactions
-            .lock()
-            .await
-            .insert(transaction_id.clone(), ());
-        Ok(ActionBeginTransactionResult {
-            transaction_id: transaction_id.as_bytes().to_vec().into(),
-        })
+    // Implement a return of an empty result.
+    async fn do_get_statement(
+        ticket: TicketStatementQuery,
+        request: Request<Ticket>,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
+        let batch = Self::fake_empty_result().map_err(|e| status!("Could not fake an empty result", e))?;
+        let schema = batch.schema_ref();
+        let batches = vec![batch.clone()];
+        let flight_data = batches_to_flight_data(schema, batches)
+            .map_err(|e| status!("Could not convert batches", e))?
+            .into_iter()
+            .map(Ok);
+
+        let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send>> =
+            Box::pin(stream::iter(flight_data));
+        let resp = Response::new(stream);
+        Ok(resp)
     }
 
-    async fn do_action_end_transaction(
-        &self,
-        query: ActionEndTransactionRequest,
-        _request: Request<Action>,
-    ) -> Result<(), Status> {
-        let transaction_id = String::from_utf8(query.transaction_id.to_vec())
-            .map_err(|_| Status::invalid_argument("Invalid transaction id"))?;
-        if self
-            .transactions
-            .lock()
-            .await
-            .remove(&transaction_id)
-            .is_none()
-        {
-            return Err(Status::invalid_argument("Transaction id not found"));
-        }
-        Ok(())
-    }
-
-    async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
-
-    async fn do_put_statement_ingest(
-        &self,
-        _ticket: CommandStatementIngest,
-        request: Request<PeekableFlightDataStream>,
-    ) -> Result<i64, Status> {
-        let batches: Vec<RecordBatch> = FlightRecordBatchStream::new_from_flight_data(
-            request.into_inner().map_err(|e| e.into()),
-        )
-        .try_collect()
-        .await?;
-        let affected_rows = batches.iter().map(|batch| batch.num_rows() as i64).sum();
-        *self.ingested_batches.lock().await.as_mut() = batches;
-        Ok(affected_rows)
-    }
 }
