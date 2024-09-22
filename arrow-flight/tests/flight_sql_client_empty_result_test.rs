@@ -40,40 +40,13 @@ use tonic::{Request, Status};
 use uuid::Uuid;
 
 #[tokio::test]
-pub async fn test_begin_end_transaction() {
+pub async fn test_get_empty_result() {
     let test_server = FlightSqlServiceImpl::new();
     let fixture = TestFixture::new(test_server.service()).await;
     let channel = fixture.channel().await;
     let mut flight_sql_client = FlightSqlServiceClient::new(channel);
 
-    // begin commit
-    let transaction_id = flight_sql_client.begin_transaction().await.unwrap();
-    flight_sql_client
-        .end_transaction(transaction_id, EndTransaction::Commit)
-        .await
-        .unwrap();
-
-    // begin rollback
-    let transaction_id = flight_sql_client.begin_transaction().await.unwrap();
-    flight_sql_client
-        .end_transaction(transaction_id, EndTransaction::Rollback)
-        .await
-        .unwrap();
-
-    // unknown transaction id
-    let transaction_id = "UnknownTransactionId".to_string().into();
-    assert!(flight_sql_client
-        .end_transaction(transaction_id, EndTransaction::Commit)
-        .await
-        .is_err());
-}
-
-#[tokio::test]
-pub async fn test_execute_ingest() {
-    let test_server = FlightSqlServiceImpl::new();
-    let fixture = TestFixture::new(test_server.service()).await;
-    let channel = fixture.channel().await;
-    let mut flight_sql_client = FlightSqlServiceClient::new(channel);
+    
     let cmd = make_ingest_command();
     let expected_rows = 10;
     let batches = vec![
@@ -89,46 +62,6 @@ pub async fn test_execute_ingest() {
     // make sure the batches made it through to the server
     let ingested_batches = test_server.ingested_batches.lock().await.clone();
     assert_eq!(ingested_batches, batches);
-}
-
-#[tokio::test]
-pub async fn test_execute_ingest_error() {
-    let test_server = FlightSqlServiceImpl::new();
-    let fixture = TestFixture::new(test_server.service()).await;
-    let channel = fixture.channel().await;
-    let mut flight_sql_client = FlightSqlServiceClient::new(channel);
-    let cmd = make_ingest_command();
-    // send an error from the client
-    let batches = vec![
-        Ok(make_primitive_batch(5)),
-        Err(FlightError::NotYetImplemented(
-            "Client error message".to_string(),
-        )),
-    ];
-    // make sure the client returns the error from the client
-    let err = flight_sql_client
-        .execute_ingest(cmd, futures::stream::iter(batches))
-        .await
-        .unwrap_err();
-    assert_eq!(
-        err.to_string(),
-        "External error: Not yet implemented: Client error message"
-    );
-}
-
-fn make_ingest_command() -> CommandStatementIngest {
-    CommandStatementIngest {
-        table_definition_options: Some(TableDefinitionOptions {
-            if_not_exist: TableNotExistOption::Create.into(),
-            if_exists: TableExistsOption::Fail.into(),
-        }),
-        table: String::from("test"),
-        schema: None,
-        catalog: None,
-        temporary: true,
-        transaction_id: None,
-        options: HashMap::default(),
-    }
 }
 
 #[derive(Clone)]
@@ -172,6 +105,38 @@ impl Default for FlightSqlServiceImpl {
 #[tonic::async_trait]
 impl FlightSqlService for FlightSqlServiceImpl {
     type FlightService = FlightSqlServiceImpl;
+
+    // Implement a dummy return for a query.
+    async fn get_flight_info_statement(
+        &self,
+        command_statement_query: CommandStatementQuery,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
+
+        // Create the `TicketStatementQuery` instance.
+        let ticket_statement_query = TicketStatementQuery {
+            statement_handle: "0102030405060708".to_string(),
+        };
+
+        let schema = Schema::new(vec![Field::new("salutation", DataType::Utf8, false)]);
+        
+        // Build and return the `FlightInfo` response.
+        let info = FlightInfo::new()
+            .try_with_schema(&schema)
+            .map_err(|e| status!("Unable to serialize schema", e))?
+            .with_descriptor(FlightDescriptor {
+                r#type: DescriptorType::Cmd.into(),
+                cmd: Default::default(),
+                path: vec![],
+            })            
+            .with_endpoint(FlightEndpoint::new().with_ticket(Ticket::new(ticket_statement_query.as_any().encode_to_vec())))
+            .with_total_records(-1 as i64) // We do not know the number of rows as we always read a stream.
+            .with_total_bytes(-1 as i64)
+            .with_ordered(false);
+
+        Ok(Response::new(info))
+
+    }
 
     // Implement a return of an empty result.
     async fn do_get_statement(
