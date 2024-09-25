@@ -20,24 +20,29 @@ mod common;
 use crate::common::fixture::TestFixture;
 use crate::common::utils::make_primitive_batch;
 
-use arrow_array::RecordBatch;
+use arrow_array::{RecordBatch, builder::StringBuilder, ArrayRef};
+use arrow_schema::{ArrowError, SchemaRef, Field, Schema, DataType};
 use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::error::FlightError;
-use arrow_flight::flight_service_server::FlightServiceServer;
+use arrow_flight::{flight_service_server::FlightServiceServer, FlightData, FlightDescriptor, FlightInfo, flight_descriptor::DescriptorType, FlightEndpoint, Ticket, flight_service_server::FlightService, utils::batches_to_flight_data};
 use arrow_flight::sql::client::FlightSqlServiceClient;
 use arrow_flight::sql::server::{FlightSqlService, PeekableFlightDataStream};
 use arrow_flight::sql::{
     ActionBeginTransactionRequest, ActionBeginTransactionResult, ActionEndTransactionRequest,
-    CommandStatementIngest, EndTransaction, SqlInfo, TableDefinitionOptions, TableExistsOption,
-    TableNotExistOption,
+    CommandStatementQuery, SqlInfo, TableDefinitionOptions, TableExistsOption,
+    TableNotExistOption, TicketStatementQuery,
 };
 use arrow_flight::Action;
-use futures::{StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt, Stream};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::pin::Pin;
+use futures::stream;
 use tokio::sync::Mutex;
 use tonic::{Request, Status};
 use uuid::Uuid;
+use tonic::Response;
+use prost::Message;
 
 #[tokio::test]
 pub async fn test_get_empty_result() {
@@ -52,7 +57,7 @@ pub async fn test_get_empty_result() {
         query: "SELECT salutation FROM dummy".to_string(),
         transaction_id: None,
     };
-    let flight_info = self.get_flight_info_for_command(cmd).await?;
+    let flight_info = flight_sql_client.execute(cmd.query, None).await.expect("Could not call client execute");
 
     if flight_info.endpoint.len() > 1 {
         panic!("Only a single endpoint is expected from ng_db_server. flight_info.endpoint.len(): {}", flight_info.endpoint.len());
@@ -71,19 +76,25 @@ pub async fn test_get_empty_result() {
     let ticket_any: arrow_flight::sql::Any = prost::Message::decode(ticket.ticket.clone()).expect("Could not decode the ticket.ticket Bytes as a Message.");
 
     // Now `unpack` the ticket to a `TicketStatementQuery`.
-    let ticket_statement_query: TicketStatementQuery = ticket_any.unpack()?
-        .ok_or_else(|| anyhow!("The TicketStatementQuery is required."))?;
+    // let ticket_statement_query: TicketStatementQuery = ticket_any.unpack().expect("Could not unpack ticket").unwrap();
 
     // Decode the `TicketStatementQuery.statement_handle` now contains the message `Bytes` for the
     // `results_handle` which is the `String` value we want. 
-    let results_handle: String = prost::Message::decode(ticket_statement_query.statement_handle).expect("Could not decode the TicketStatementQuery.handle");
+    // let results_handle: String = prost::Message::decode(ticket_statement_query.statement_handle).expect("Could not decode the TicketStatementQuery.handle");
 
-    let flight_data = self.inner.do_get(ticket.clone()).await?;
+    let mut flight_data = flight_sql_client.do_get(ticket.clone()).await.unwrap();
 
     // Get the first RecordBatch which should be an empty batch.
-    let rb = flight_data.next().await?;
+    let rb = flight_data.next().await;
 
     assert!(rb.is_some());
+}
+
+// Formatter for server status.
+macro_rules! status {
+    ($desc:expr, $err:expr) => {
+        Status::internal(format!("{}: {} at {}:{}", $desc, $err, file!(), line!()))
+    };
 }
 
 #[derive(Clone)]
@@ -107,7 +118,7 @@ impl FlightSqlServiceImpl {
         // builder.append_value("Hello, FlightSQL!");
         let cols = vec![Arc::new(builder.finish()) as ArrayRef];
         // RecordBatch::try_new(Arc::new(schema), cols)
-        Ok(RecordBatch::new_empty(schema))
+        Ok(RecordBatch::new_empty(schema.into()))
     }
 
 }
@@ -122,6 +133,8 @@ impl Default for FlightSqlServiceImpl {
 impl FlightSqlService for FlightSqlServiceImpl {
     type FlightService = FlightSqlServiceImpl;
 
+    async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
+
     // Implement a dummy return for a query.
     async fn get_flight_info_statement(
         &self,
@@ -131,7 +144,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
 
         // Create the `TicketStatementQuery` instance.
         let ticket_statement_query = TicketStatementQuery {
-            statement_handle: "0102030405060708".to_string(),
+            statement_handle: "0102030405060708".to_string().into(),
         };
 
         let schema = Schema::new(vec![Field::new("salutation", DataType::Utf8, false)]);
@@ -145,7 +158,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
                 cmd: Default::default(),
                 path: vec![],
             })            
-            .with_endpoint(FlightEndpoint::new().with_ticket(Ticket::new(ticket_statement_query.as_any().encode_to_vec())))
+            .with_endpoint(FlightEndpoint::new().with_ticket(Ticket::new(ticket_statement_query.encode_to_vec())))
             .with_total_records(-1 as i64) // We do not know the number of rows as we always read a stream.
             .with_total_bytes(-1 as i64)
             .with_ordered(false);
@@ -156,6 +169,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
 
     // Implement a return of an empty result.
     async fn do_get_statement(
+        &self,
         ticket: TicketStatementQuery,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
