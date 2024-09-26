@@ -76,18 +76,18 @@ pub async fn test_get_empty_result() {
     let ticket_any: arrow_flight::sql::Any = prost::Message::decode(ticket.ticket.clone()).expect("Could not decode the ticket.ticket Bytes as a Message.");
 
     // Now `unpack` the ticket to a `TicketStatementQuery`.
-    // let ticket_statement_query: TicketStatementQuery = ticket_any.unpack().expect("Could not unpack ticket").unwrap();
+    let ticket_statement_query: TicketStatementQuery = ticket_any.unpack().expect("Could not unpack ticket").unwrap();
 
     // Decode the `TicketStatementQuery.statement_handle` now contains the message `Bytes` for the
     // `results_handle` which is the `String` value we want. 
-    // let results_handle: String = prost::Message::decode(ticket_statement_query.statement_handle).expect("Could not decode the TicketStatementQuery.handle");
+    let results_handle: String = prost::Message::decode(ticket_statement_query.clone().statement_handle).expect("Could not decode the TicketStatementQuery.handle");
+    println!("results_handle: {} ticket_statement_query: {:?} ticket_statement_query.statement_handle: {}", results_handle, &ticket_statement_query, std::str::from_utf8(&ticket_statement_query.statement_handle).expect("Could not build str from utf8 bytes"));
 
     let mut flight_data = flight_sql_client.do_get(ticket.clone()).await.unwrap();
 
     // Get the first RecordBatch which should be an empty batch.
     let rb = flight_data.next().await;
 
-    dbg!(&rb);
     assert!(rb.is_some());
 }
 
