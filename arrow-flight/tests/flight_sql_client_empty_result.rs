@@ -30,7 +30,7 @@ use arrow_flight::sql::server::{FlightSqlService, PeekableFlightDataStream};
 use arrow_flight::sql::{
     ActionBeginTransactionRequest, ActionBeginTransactionResult, ActionEndTransactionRequest,
     CommandStatementQuery, SqlInfo, TableDefinitionOptions, TableExistsOption,
-    TableNotExistOption, TicketStatementQuery,
+    TableNotExistOption, TicketStatementQuery, ProstMessageExt,
 };
 use arrow_flight::Action;
 use futures::{StreamExt, TryStreamExt, Stream};
@@ -87,6 +87,7 @@ pub async fn test_get_empty_result() {
     // Get the first RecordBatch which should be an empty batch.
     let rb = flight_data.next().await;
 
+    dbg!(&rb);
     assert!(rb.is_some());
 }
 
@@ -158,7 +159,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
                 cmd: Default::default(),
                 path: vec![],
             })            
-            .with_endpoint(FlightEndpoint::new().with_ticket(Ticket::new(ticket_statement_query.encode_to_vec())))
+            .with_endpoint(FlightEndpoint::new().with_ticket(Ticket::new(ticket_statement_query.as_any().encode_to_vec())))
             .with_total_records(-1 as i64) // We do not know the number of rows as we always read a stream.
             .with_total_bytes(-1 as i64)
             .with_ordered(false);
