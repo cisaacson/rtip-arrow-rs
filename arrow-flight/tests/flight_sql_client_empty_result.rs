@@ -115,10 +115,7 @@ impl FlightSqlServiceImpl {
 
     fn fake_empty_result() -> Result<RecordBatch, ArrowError> {
         let schema = Schema::new(vec![Field::new("salutation", DataType::Utf8, false)]);
-        let mut builder = StringBuilder::new(); // Add an empty StringBuilder array.
-        // builder.append_value("Hello, FlightSQL!");
-        let cols = vec![Arc::new(builder.finish()) as ArrayRef];
-        // RecordBatch::try_new(Arc::new(schema), cols)
+
         Ok(RecordBatch::new_empty(schema.into()))
     }
 
